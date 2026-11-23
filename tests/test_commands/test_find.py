@@ -157,11 +157,11 @@ class TestFindE2E:
         mock_questionary_print,
         mock_print_grey,
     ):
-        """Search for nonexistent term shows 'No items found'."""
+        """Search for nonexistent term shows 'No results found'."""
         cli_executor.exec_command("find 'xyznonexistent98765zzz'")
 
         grey_output = " ".join(str(c) for c in mock_print_grey.call_args_list)
-        assert "No items found" in grey_output
+        assert "No results found" in grey_output
 
     def test_find_with_ne_filter_success(
         self,
@@ -180,7 +180,7 @@ class TestFindE2E:
         cli_executor.exec_command(f"find '{notebook.display_name}' -P type!=Notebook")
 
         all_output = " ".join(str(c) for c in mock_questionary_print.call_args_list)
-        assert "Notebook" not in all_output or "No items found" in " ".join(
+        assert "Notebook" not in all_output or "No results found" in " ".join(
             str(c) for c in mock_print_grey.call_args_list
         )
 
@@ -203,21 +203,9 @@ class TestFindE2E:
         )
 
         all_output = " ".join(str(c) for c in mock_questionary_print.call_args_list)
-        assert "Notebook" not in all_output or "No items found" in " ".join(
+        assert "Notebook" not in all_output or "No results found" in " ".join(
             str(c) for c in mock_print_grey.call_args_list
         )
-
-    def test_find_unknown_type_failure(
-        self,
-        cli_executor: CLIExecutor,
-        mock_questionary_print,
-        mock_fab_ui_print_error,
-    ):
-        """Search with unknown type shows error."""
-        cli_executor.exec_command("find 'data' -P type=FakeType123")
-
-        error_output = str(mock_fab_ui_print_error.call_args_list)
-        assert ErrorMessages.Find.unrecognized_type("FakeType123", "") in error_output
 
     def test_find_unsupported_type_failure(
         self,
@@ -456,7 +444,7 @@ class TestFindPagination:
         assert not prompt_called, "Prompt should not appear for single page"
         output = " ".join(str(c) for c in mock_questionary_print.call_args_list)
         assert "NB-0" in output
-        assert "3 items found" in output
+        assert "3 results found" in output
 
     def test_find_multi_page_interactive_success(
         self,
@@ -472,7 +460,7 @@ class TestFindPagination:
         output = " ".join(str(c) for c in mock_questionary_print.call_args_list)
         assert "NB-P1-0" in output
         assert "NB-P2-0" in output
-        assert "5 items found" in output
+        assert "5 results found" in output
 
     def test_find_no_items_display_after_jmespath_filters_all_success(
         self,
@@ -481,7 +469,7 @@ class TestFindPagination:
         mock_print_grey,
         monkeypatch,
     ):
-        """JMESPath filter empties all results → 'No items found.'"""
+        """JMESPath filter empties all results → 'No results found.'"""
         monkeypatch.setattr(
             "builtins.input", lambda *a: (_ for _ in ()).throw(EOFError)
         )
@@ -491,7 +479,7 @@ class TestFindPagination:
         )
 
         grey_output = " ".join(str(c) for c in mock_print_grey.call_args_list)
-        assert "No items found" in grey_output
+        assert "No results found" in grey_output
 
     def test_find_jmespath_skips_empty_page_success(
         self,
@@ -518,3 +506,109 @@ class TestFindPagination:
         output = " ".join(str(c) for c in mock_questionary_print.call_args_list)
         assert "NB-" in output
         assert "LH-" not in output
+
+
+class TestFindCatalogEntries:
+    """Tests for table and workspace entries and for type and workspace filters.
+
+    Uses handcrafted VCR cassettes (not recordable). VCR matches the JSON
+    request body, so each test also verifies the exact filter sent to the API.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_on_record(self, vcr_mode):
+        if vcr_mode == "all":
+            pytest.skip("Synthetic cassettes — not recordable")
+
+    @pytest.fixture(autouse=True)
+    def _mock_input(self, monkeypatch):
+        """Raise EOFError on input() to stop pagination after the first page."""
+        monkeypatch.setattr(
+            "builtins.input", lambda *args: (_ for _ in ()).throw(EOFError)
+        )
+
+    def test_find_table_shows_owning_item_type_success(
+        self,
+        cli_executor: CLIExecutor,
+        mock_questionary_print,
+    ):
+        """A table result shows the owning item's type."""
+        cli_executor.exec_command("find 'customer_id' -P type=table")
+
+        _assert_strings_in_mock_calls(
+            ["DimCustomer", "Table", "Lakehouse", "item_type"],
+            should_exist=True,
+            mock_calls=mock_questionary_print.call_args_list,
+        )
+
+    def test_find_table_long_shows_item_id_and_schema_success(
+        self,
+        cli_executor: CLIExecutor,
+        mock_questionary_print,
+    ):
+        """With -l, a table result also shows the owning item ID and schema."""
+        cli_executor.exec_command("find 'customer_id' -P type=Table -l")
+
+        _assert_strings_in_mock_calls(
+            ["22222222-2222-2222-2222-222222222222", "dbo", "item_id", "schema"],
+            should_exist=True,
+            mock_calls=mock_questionary_print.call_args_list,
+        )
+
+    def test_find_workspace_filter_by_name_success(
+        self,
+        cli_executor: CLIExecutor,
+        mock_questionary_print,
+    ):
+        """-P workspace=<name> filters by workspace display name."""
+        cli_executor.exec_command("find 'sales' -P workspace=Finance")
+
+        _assert_strings_in_mock_calls(
+            ["SalesReport", "Finance"],
+            should_exist=True,
+            mock_calls=mock_questionary_print.call_args_list,
+        )
+
+    def test_find_workspace_filter_by_id_with_type_success(
+        self,
+        cli_executor: CLIExecutor,
+        mock_questionary_print,
+    ):
+        """-P workspace=<GUID> filters by workspace ID and combines with type."""
+        cli_executor.exec_command(
+            "find 'sales' -P type=Report,workspace=11111111-1111-1111-1111-111111111111"
+        )
+
+        _assert_strings_in_mock_calls(
+            ["SalesReport"],
+            should_exist=True,
+            mock_calls=mock_questionary_print.call_args_list,
+        )
+
+    def test_find_workspace_result_without_hierarchy_success(
+        self,
+        cli_executor: CLIExecutor,
+        mock_questionary_print,
+    ):
+        """A workspace result, which has no hierarchy, is displayed."""
+        cli_executor.exec_command("""find '"Finance"' -P type=Workspace""")
+
+        _assert_strings_in_mock_calls(
+            ["Finance", "Workspace"],
+            should_exist=True,
+            mock_calls=mock_questionary_print.call_args_list,
+            require_all_in_same_args=True,
+        )
+
+    def test_find_unknown_type_passed_to_api_success(
+        self,
+        cli_executor: CLIExecutor,
+        mock_print_grey,
+        mock_fab_ui_print_error,
+    ):
+        """An unknown type is sent to the API instead of being rejected locally."""
+        cli_executor.exec_command("find 'data' -P type=FakeType123")
+
+        assert not mock_fab_ui_print_error.call_args_list
+        grey_output = " ".join(str(c) for c in mock_print_grey.call_args_list)
+        assert "No results found" in grey_output

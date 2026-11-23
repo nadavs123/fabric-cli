@@ -9,8 +9,9 @@ from fabric_cli.commands.find import fab_find as find
 from fabric_cli.utils import fab_error_parser as utils_error_parser
 from fabric_cli.utils import fab_ui as utils_ui
 
-
-COMMAND_FIND_DESCRIPTION = "Search the OneLake catalog for items."
+COMMAND_FIND_DESCRIPTION = (
+    "Search the OneLake catalog for items, tables, workspaces, and workspace apps."
+)
 
 commands = {
     "Description": {
@@ -26,6 +27,12 @@ def register_parser(subparsers: _SubParsersAction) -> None:
         "$ find 'sales report'\n",
         "# search for lakehouses only",
         "$ find 'data' -P type=Lakehouse\n",
+        "# find tables by table or column name",
+        "$ find 'customer_id' -P type=Table\n",
+        "# search within a workspace (by name or ID)",
+        "$ find 'sales' -P workspace=Finance\n",
+        "# find a workspace by name",
+        "$ find '\"Finance\"' -P type=Workspace\n",
         "# search for multiple item types (bracket syntax)",
         "$ find 'dashboard' -P type=[Report,SemanticModel]\n",
         "# exclude a type",
@@ -35,7 +42,7 @@ def register_parser(subparsers: _SubParsersAction) -> None:
         "# show detailed output with IDs",
         "$ find 'sales' -l\n",
         "# combine filters",
-        "$ find 'finance' -P type=[Warehouse,Lakehouse] -l\n",
+        "$ find 'finance' -P type=[Warehouse,Lakehouse],workspace=Finance -l\n",
         "# filter results client-side with JMESPath",
         "$ find 'sales' -q \"[?type=='Report']\"\n",
         "# project specific fields",
@@ -52,14 +59,14 @@ def register_parser(subparsers: _SubParsersAction) -> None:
     parser.add_argument(
         "search_text",
         metavar="query",
-        help="Search text (matches display name, description, and workspace name)",
+        help="Search text (matches display name, description, and workspace name; for tables, also column names and descriptions)",
     )
     parser.add_argument(
         "-P",
         "--params",
         metavar="",
         nargs="?",
-        help="Parameters in key=value or key!=value format. Use brackets for multiple values: type=[Lakehouse,Notebook]. Use != to exclude: type!=Dashboard",
+        help="Filters in key=value or key!=value format. Keys: type, workspace (name or ID). Use brackets for multiple values: type=[Lakehouse,Notebook]. Use != to exclude: type!=Dashboard",
     )
     parser.add_argument(
         "-l",

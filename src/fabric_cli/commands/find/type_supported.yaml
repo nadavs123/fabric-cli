@@ -1,8 +1,13 @@
 ---
-# Item types for the find command (Catalog Search API)
+# Known catalog entry types for the find command (Catalog Search API).
+# Used to normalize casing and to reject types the API can't search.
+# Types not listed here are passed through to the API unchanged.
 # Reference: https://learn.microsoft.com/en-us/rest/api/fabric/core/catalog/search
 
 supported:
+  - Workspace
+  - WorkspaceApp
+  - Table
   - AnomalyDetector
   - ApacheAirflowJob
   - CopyJob

@@ -5,6 +5,7 @@
 
 import json
 import os
+import re
 from argparse import Namespace
 from typing import Any
 
@@ -33,11 +34,15 @@ _TYPE_CONFIG = _load_type_config()
 ALL_ITEM_TYPES = _TYPE_CONFIG["supported"] + _TYPE_CONFIG["unsupported"]
 UNSUPPORTED_ITEM_TYPES = _TYPE_CONFIG["unsupported"]
 
+_GUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
 
 @handle_exceptions()
 @set_command_context()
 def find_command(args: Namespace) -> None:
-    """Search the OneLake catalog for items."""
+    """Search the OneLake catalog for items, tables, workspaces, and workspace apps."""
     if args.query:
         args.query = utils.process_nargs(args.query)
 
@@ -80,7 +85,7 @@ def _next_page_payload(token: str, current: dict[str, Any]) -> dict[str, Any]:
 
 def _print_search_summary(count: int, has_more_pages: bool = False) -> None:
     """Print the search result summary line."""
-    label = "item" if count == 1 else "items"
+    label = "result" if count == 1 else "results"
     count_msg = f"{count} {label} found" + (" (more available)" if has_more_pages else "")
     utils_ui.print_grey("")
     utils_ui.print_grey(count_msg)
@@ -128,7 +133,7 @@ def _find_interactive(args: Namespace, payload: dict[str, Any]) -> None:
         )
 
     if total_count == 0:
-        utils_ui.print_grey("No items found.")
+        utils_ui.print_grey("No results found.")
 
 
 def _find_commandline(args: Namespace, payload: dict[str, Any]) -> None:
@@ -143,12 +148,12 @@ def _find_commandline(args: Namespace, payload: dict[str, Any]) -> None:
         all_items.extend(items)
 
     if not all_items:
-        utils_ui.print_grey("No items found.")
+        utils_ui.print_grey("No results found.")
         return
 
     display_items, truncate_cols = _prepare_display_items(args, all_items)
     if not display_items:
-        utils_ui.print_grey("No items found.")
+        utils_ui.print_grey("No results found.")
         return
     _print_search_summary(len(display_items))
     _display_items(args, display_items, truncate_cols)
@@ -159,33 +164,70 @@ def _build_search_payload(args: Namespace, is_interactive: bool) -> dict[str, An
     request: dict[str, Any] = {"search": args.search_text}
     request["pageSize"] = 30 if is_interactive else 1000
 
-    type_filter = _parse_type_from_params(args)
-    if type_filter:
-        op = type_filter["operator"]
-        types = type_filter["values"]
-        joiner = " or " if op == "eq" else " and "
-        clauses = [f"Type {op} '{t}'" for t in types]
-        request["filter"] = (
-            f"({joiner.join(clauses)})" if len(clauses) > 1 else clauses[0]
-        )
+    filters = _parse_filter_params(args)
+    clauses = []
+    if "type" in filters:
+        clauses.append(_build_type_clause(filters["type"]))
+    if "workspace" in filters:
+        clauses.append(_build_workspace_clause(filters["workspace"]))
+    if clauses:
+        request["filter"] = " and ".join(clauses)
 
     return request
 
 
-def _parse_type_from_params(args: Namespace) -> dict[str, Any] | None:
-    """Extract and validate item types from -P params.
+def _quote_filter_value(value: str) -> str:
+    """Quote a filter value as an OData string literal."""
+    return "'" + value.replace("'", "''") + "'"
 
-    Supports:
-        -P type=Report              → eq single
-        -P type=[Report,Lakehouse]  → eq multiple (or)
-        -P type!=Dashboard          → ne single
-        -P type!=[Dashboard,Report] → ne multiple (and)
 
-    Returns dict with 'operator' ('eq' or 'ne') and 'values' list, or None.
+def _combine_clauses(clauses: list[str], operator: str, multiple: bool) -> str:
+    """Join per-value clauses: 'or' for eq, 'and' for ne, grouped when needed."""
+    joiner = " or " if operator == "eq" else " and "
+    combined = joiner.join(clauses)
+    return f"({combined})" if multiple else combined
+
+
+def _build_type_clause(type_filter: dict[str, Any]) -> str:
+    """Build the Type clause of the filter."""
+    op = type_filter["operator"]
+    values = type_filter["values"]
+    clauses = [f"Type {op} {_quote_filter_value(v)}" for v in values]
+    return _combine_clauses(clauses, op, len(clauses) > 1)
+
+
+def _build_workspace_clause(workspace_filter: dict[str, Any]) -> str:
+    """Build the workspace clause, by ID for GUIDs and by display name otherwise."""
+    op = workspace_filter["operator"]
+    clauses = []
+    for value in workspace_filter["values"]:
+        prop = (
+            "Hierarchy/Workspace/Id"
+            if _GUID_PATTERN.match(value)
+            else "Hierarchy/Workspace/DisplayName"
+        )
+        clauses.append(f"{prop} {op} {_quote_filter_value(value)}")
+    return _combine_clauses(clauses, op, len(clauses) > 1)
+
+
+def _parse_filter_params(args: Namespace) -> dict[str, dict[str, Any]]:
+    """Extract and validate filters from -P params.
+
+    Supports the 'type' and 'workspace' keys, each with = (eq) or != (ne) and
+    a single value or a bracketed list:
+        -P type=Report                     -> eq single
+        -P type=[Report,Lakehouse]         -> eq multiple (or)
+        -P type!=[Dashboard,Report]        -> ne multiple (and)
+        -P workspace=Sales                 -> workspace display name
+        -P workspace=<workspace-id>        -> workspace ID
+        -P type=Table,workspace=[Sales,Ops]
+
+    Returns a dict keyed by 'type' and/or 'workspace', each with 'operator'
+    ('eq' or 'ne') and a 'values' list.
     """
     params_str = getattr(args, "params", None)
     if not params_str:
-        return None
+        return {}
 
     # nargs="?" gives a string; nargs="*" gives a list (backward compat)
     if isinstance(params_str, list):
@@ -193,67 +235,60 @@ def _parse_type_from_params(args: Namespace) -> dict[str, Any] | None:
 
     params_dict = utils.get_dict_from_params(params_str, max_depth=1)
 
-    # Check for type key (with or without ! for ne operator)
-    type_value = None
-    operator = "eq"
+    filters: dict[str, dict[str, Any]] = {}
     for key, value in params_dict.items():
         # get_dict_from_params splits on first "=", so "type!=X" becomes key="type!", value="X"
-        clean_key = key.rstrip("!")
-        is_ne = key.endswith("!")
-
-        if clean_key.lower() == "type":
-            type_value = value
-            operator = "ne" if is_ne else "eq"
-        else:
+        clean_key = key.rstrip("!").lower()
+        operator = "ne" if key.endswith("!") else "eq"
+        if clean_key not in ("type", "workspace"):
             raise FabricCLIError(
-                ErrorMessages.Common.unsupported_parameter(clean_key),
+                ErrorMessages.Common.unsupported_parameter(key.rstrip("!")),
                 fab_constant.ERROR_INVALID_INPUT,
             )
+        values = _split_param_values(value)
+        if not values:
+            continue
+        if clean_key == "type":
+            values = _normalize_types(values, operator)
+        filters[clean_key] = {"operator": operator, "values": values}
 
-    if not type_value:
-        return None
+    return filters
 
-    # Parse bracket syntax: [val1,val2] or plain: val1
-    if type_value.startswith("[") and type_value.endswith("]"):
-        inner = type_value[1:-1]
-        types = [t.strip() for t in inner.split(",") if t.strip()]
-        if not types:
+
+def _split_param_values(value: str) -> list[str]:
+    """Split a bracketed list ([a,b]) or a single value into a list of values."""
+    value = (value or "").strip()
+    if value.startswith("[") and value.endswith("]"):
+        values = [v.strip() for v in value[1:-1].split(",") if v.strip()]
+        if not values:
             raise FabricCLIError(
                 ErrorMessages.Find.unrecognized_type(
-                    "[]", " Specify at least one item type."
+                    "[]", " Specify at least one value."
                 ),
                 fab_constant.ERROR_INVALID_INPUT,
             )
-    else:
-        types = [type_value.strip()]
+        return values
+    return [value] if value else []
 
+
+def _normalize_types(types: list[str], operator: str) -> list[str]:
+    """Normalize known type names to their canonical casing.
+
+    Unknown types are passed through unchanged so new catalog entry types work
+    without a CLI update; the API rejects or returns nothing for invalid ones.
+    """
     all_types_lower = {t.lower(): t for t in ALL_ITEM_TYPES}
     unsupported_lower = {t.lower() for t in UNSUPPORTED_ITEM_TYPES}
     normalized = []
     for t in types:
         t_lower = t.lower()
         if t_lower in unsupported_lower and operator == "eq":
-            canonical = all_types_lower.get(t_lower, t)
             raise FabricCLIError(
-                ErrorMessages.Common.type_not_supported(canonical),
+                ErrorMessages.Common.type_not_supported(all_types_lower[t_lower]),
                 fab_constant.ERROR_UNSUPPORTED_ITEM_TYPE,
             )
-        if t_lower not in all_types_lower:
-            close = [
-                v for k, v in all_types_lower.items() if t_lower in k or k in t_lower
-            ]
-            hint = (
-                f" Did you mean [{','.join(close)}]?"
-                if close
-                else " Run 'find --help' to see examples."
-            )
-            raise FabricCLIError(
-                ErrorMessages.Find.unrecognized_type(t, hint),
-                fab_constant.ERROR_INVALID_ITEM_TYPE,
-            )
-        normalized.append(all_types_lower[t_lower])
-
-    return {"operator": operator, "values": normalized}
+        normalized.append(all_types_lower.get(t_lower, t))
+    return normalized
 
 
 def _parse_response(response) -> dict:
@@ -283,12 +318,22 @@ def _parse_response(response) -> dict:
 
 def _get_workspace_field(item: dict, field: str) -> str | None:
     """Extract workspace field, supporting both flat and hierarchy formats."""
-    ws = item.get("hierarchy", {}).get("workspace", {})
+    ws = (item.get("hierarchy") or {}).get("workspace") or {}
     if field == "name":
         return ws.get("displayName") or item.get("workspaceName")
     if field == "id":
         return ws.get("id") or item.get("workspaceId")
     return None
+
+
+def _get_parent_item(item: dict) -> dict:
+    """Return the owning item of an object entry such as a table, or {}."""
+    return (item.get("hierarchy") or {}).get("item") or {}
+
+
+def _get_parent_object_name(item: dict) -> str | None:
+    """Return the parent object name of an object entry, such as its schema."""
+    return ((item.get("hierarchy") or {}).get("object") or {}).get("displayName")
 
 
 def _prepare_display_items(
@@ -301,9 +346,11 @@ def _prepare_display_items(
     """
     show_details = getattr(args, "long", False)
     has_descriptions = any(item.get("description") for item in items)
+    has_parent_items = any(_get_parent_item(item) for item in items)
 
     display_items = []
     for item in items:
+        parent_item = _get_parent_item(item)
         if show_details:
             entry = {
                 "name": item.get("displayName") or item.get("name"),
@@ -312,12 +359,18 @@ def _prepare_display_items(
                 "workspace": _get_workspace_field(item, "name"),
                 "workspace_id": _get_workspace_field(item, "id"),
             }
+            if has_parent_items:
+                entry["item_type"] = parent_item.get("type")
+                entry["item_id"] = parent_item.get("id")
+                entry["schema"] = _get_parent_object_name(item)
         else:
             entry = {
                 "name": item.get("displayName") or item.get("name"),
                 "type": item.get("type"),
                 "workspace": _get_workspace_field(item, "name"),
             }
+            if has_parent_items:
+                entry["item_type"] = parent_item.get("type")
         if has_descriptions:
             entry["description"] = item.get("description") or ""
         display_items.append(entry)
